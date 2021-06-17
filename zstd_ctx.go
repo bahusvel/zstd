@@ -21,6 +21,9 @@ type Ctx interface {
 	// CompressLevel is the same as Compress but you can pass a compression level
 	CompressLevel(dst, src []byte, level int) ([]byte, error)
 
+	CompressWithDict(dst, src []byte, dict Dict) ([]byte, error)
+	// DecompressWithDict(dst, src []byte, dict Dict) ([]byte, error)
+
 	// Decompress src into dst.  If you have a buffer to use, you can pass it to
 	// prevent allocation.  If it is too small, or if nil is passed, a new buffer
 	// will be allocated and returned.
@@ -30,6 +33,14 @@ type Ctx interface {
 type ctx struct {
 	cctx *C.ZSTD_CCtx
 	dctx *C.ZSTD_DCtx
+}
+
+type Dict struct {
+	dict *C.ZSTD_CDict
+}
+
+func LoadDict(dict []byte, level int) Dict {
+	return Dict{dict: C.ZSTD_createCDict(unsafe.Pointer(&dict[0]), C.size_t(len(dict)), C.int(level))}
 }
 
 // Create a new ZStd Context.
@@ -53,6 +64,44 @@ func NewCtx() Ctx {
 
 func (c *ctx) Compress(dst, src []byte) ([]byte, error) {
 	return c.CompressLevel(dst, src, DefaultCompression)
+}
+
+func (c *ctx) CompressWithDict(dst, src []byte, dict Dict) ([]byte, error) {
+	bound := CompressBound(len(src))
+	if cap(dst) >= bound {
+		dst = dst[0:bound] // Reuse dst buffer
+	} else {
+		dst = make([]byte, bound)
+	}
+
+	// We need unsafe.Pointer(&src[0]) in the Cgo call to avoid "Go pointer to Go pointer" panics.
+	// This means we need to special case empty input. See:
+	// https://github.com/golang/go/issues/14210#issuecomment-346402945
+	var cWritten C.size_t
+	if len(src) == 0 {
+		cWritten = C.ZSTD_compress_usingCDict(
+			c.cctx,
+			unsafe.Pointer(&dst[0]),
+			C.size_t(len(dst)),
+			unsafe.Pointer(nil),
+			C.size_t(0),
+			dict.dict)
+	} else {
+		cWritten = C.ZSTD_compress_usingCDict(
+			c.cctx,
+			unsafe.Pointer(&dst[0]),
+			C.size_t(len(dst)),
+			unsafe.Pointer(&src[0]),
+			C.size_t(len(src)),
+			dict.dict)
+	}
+
+	written := int(cWritten)
+	// Check if the return is an Error code
+	if err := getError(written); err != nil {
+		return nil, err
+	}
+	return dst[:written], nil
 }
 
 func (c *ctx) CompressLevel(dst, src []byte, level int) ([]byte, error) {
@@ -92,6 +141,12 @@ func (c *ctx) CompressLevel(dst, src []byte, level int) ([]byte, error) {
 	}
 	return dst[:written], nil
 }
+
+// func (c *ctx) DecompressWithDict(dst, src []byte, dict Dict) ([]byte, error) {
+// 	if len(src) == 0 {
+// 		return []byte{}, ErrEmptySlice
+// 	}
+// }
 
 func (c *ctx) Decompress(dst, src []byte) ([]byte, error) {
 	if len(src) == 0 {
