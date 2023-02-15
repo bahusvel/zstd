@@ -6,7 +6,7 @@ package zstd
 */
 import "C"
 import (
-	"fmt"
+	"errors"
 	"unsafe"
 )
 
@@ -28,7 +28,7 @@ func TrainFromBuffer(samples [][]byte) ([]byte, error) {
 
 	dictSize := C.ZDICT_trainFromBuffer(unsafe.Pointer(&dictBuffer[0]), dictBufferCapacity, unsafe.Pointer(&samplesBuffer[0]), (*C.size_t)(unsafe.Pointer(&sampleSizes[0])), nbSamples)
 	if C.ZDICT_isError(dictSize) != 0 {
-		return []byte{}, fmt.Errorf("training failed %d", dictSize)
+		return []byte{}, errors.New(C.GoString(C.ZDICT_getErrorName(dictSize)))
 	}
 
 	return dictBuffer[:dictSize], nil
