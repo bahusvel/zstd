@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"runtime/debug"
+	"strings"
 	"testing"
 )
 
@@ -19,9 +20,16 @@ func failOnError(t *testing.T, msg string, err error) {
 	}
 }
 
-func testCompressionDecompression(t *testing.T, dict []byte, payload []byte) {
+func testCompressionDecompression(t *testing.T, dict []byte, payload []byte, nbWorkers int) {
 	var w bytes.Buffer
 	writer := NewWriterLevelDict(&w, DefaultCompression, dict)
+
+	if nbWorkers > 1 {
+		if err := writer.SetNbWorkers(nbWorkers); err == ErrNoParallelSupport {
+			t.Skip()
+		}
+	}
+
 	_, err := writer.Write(payload)
 	failOnError(t, "Failed writing to compress object", err)
 	failOnError(t, "Failed to close compress object", writer.Close())
@@ -39,7 +47,7 @@ func testCompressionDecompression(t *testing.T, dict []byte, payload []byte) {
 	// Decompress
 	r := NewReaderDict(rr, dict)
 	dst := make([]byte, len(payload))
-	n, err := r.Read(dst)
+	n, err := io.ReadFull(r, dst)
 	if err != nil {
 		failOnError(t, "Failed to read for decompression", err)
 	}
@@ -79,11 +87,11 @@ func TestResize(t *testing.T) {
 }
 
 func TestStreamSimpleCompressionDecompression(t *testing.T) {
-	testCompressionDecompression(t, nil, []byte("Hello world!"))
+	testCompressionDecompression(t, nil, []byte("Hello world!"), 1)
 }
 
 func TestStreamEmptySlice(t *testing.T) {
-	testCompressionDecompression(t, nil, []byte{})
+	testCompressionDecompression(t, nil, []byte{}, 1)
 }
 
 func TestZstdReaderLong(t *testing.T) {
@@ -91,7 +99,7 @@ func TestZstdReaderLong(t *testing.T) {
 	for i := 0; i < 10000; i++ {
 		long.Write([]byte("Hellow World!"))
 	}
-	testCompressionDecompression(t, nil, long.Bytes())
+	testCompressionDecompression(t, nil, long.Bytes(), 1)
 }
 
 func doStreamCompressionDecompression() error {
@@ -186,7 +194,7 @@ func TestStreamRealPayload(t *testing.T) {
 	if raw == nil {
 		t.Skip(ErrNoPayloadEnv)
 	}
-	testCompressionDecompression(t, nil, raw)
+	testCompressionDecompression(t, nil, raw, 1)
 }
 
 func TestStreamEmptyPayload(t *testing.T) {
@@ -211,9 +219,16 @@ func TestStreamEmptyPayload(t *testing.T) {
 }
 
 func TestStreamFlush(t *testing.T) {
-	var w bytes.Buffer
-	writer := NewWriter(&w)
-	reader := NewReader(&w)
+	// use an actual os pipe so that
+	// - it's buffered and we don't get a 1-read = 1-write behaviour (io.Pipe)
+	// - reading doesn't send EOF when we're done reading the buffer (bytes.Buffer)
+	pr, pw, err := os.Pipe()
+	failOnError(t, "Failed creating pipe", err)
+	defer pw.Close()
+	defer pr.Close()
+
+	writer := NewWriter(pw)
+	reader := NewReader(pr)
 
 	payload := "cc" // keep the payload short to make sure it will not be automatically flushed by zstd
 	buf := make([]byte, len(payload))
@@ -391,12 +406,21 @@ func TestStreamWriteNoGoPointers(t *testing.T) {
 	})
 }
 
+func TestStreamSetNbWorkers(t *testing.T) {
+	// Build a big string first
+	s := strings.Repeat("foobaa", 1000*1000)
+
+	nbWorkers := 4
+	testCompressionDecompression(t, nil, []byte(s), nbWorkers)
+}
+
 func BenchmarkStreamCompression(b *testing.B) {
 	if raw == nil {
 		b.Fatal(ErrNoPayloadEnv)
 	}
 	var intermediate bytes.Buffer
 	w := NewWriter(&intermediate)
+	// w.SetNbWorkers(8)
 	defer w.Close()
 	b.SetBytes(int64(len(raw)))
 	b.ResetTimer()
@@ -429,7 +453,7 @@ func BenchmarkStreamDecompression(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		rr := bytes.NewReader(compressed)
 		r := NewReader(rr)
-		_, err := r.Read(dst)
+		_, err := io.ReadFull(r, dst)
 		if err != nil {
 			b.Fatalf("Failed to decompress: %s", err)
 		}
